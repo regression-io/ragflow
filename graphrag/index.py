@@ -21,6 +21,7 @@ from typing import List
 import networkx as nx
 from api.db import LLMType
 from api.db.services.llm_service import LLMBundle
+from api.db.services.user_service import TenantService
 from graphrag.community_reports_extractor import CommunityReportsExtractor
 from graphrag.entity_resolution import EntityResolution
 from graphrag.graph_extractor import GraphExtractor
@@ -30,6 +31,11 @@ from rag.utils import num_tokens_from_string
 
 
 def be_children(obj: dict, keyset:set):
+    if isinstance(obj, str):
+        obj = [obj]
+    if isinstance(obj, list):
+        for i in obj: keyset.add(i)
+        return [{"id": re.sub(r"\*+", "", i), "children":[]} for i in obj]
     arr = []
     for k,v in obj.items():
         k = re.sub(r"\*+", "", k)
@@ -37,7 +43,7 @@ def be_children(obj: dict, keyset:set):
         keyset.add(k)
         arr.append({
             "id": k,
-            "children": be_children(v, keyset) if isinstance(v, dict) else []
+            "children": be_children(v, keyset)
         })
     return arr
 
@@ -65,7 +71,8 @@ def graph_merge(g1, g2):
 
 
 def build_knowlege_graph_chunks(tenant_id: str, chunks: List[str], callback, entity_types=["organization", "person", "location", "event", "time"]):
-    llm_bdl = LLMBundle(tenant_id, LLMType.CHAT)
+    _, tenant = TenantService.get_by_id(tenant_id)
+    llm_bdl = LLMBundle(tenant_id, LLMType.CHAT, tenant.llm_id)
     ext = GraphExtractor(llm_bdl)
     left_token_count = llm_bdl.max_length - ext.prompt_token_count - 1024
     left_token_count = max(llm_bdl.max_length * 0.8, left_token_count)
@@ -79,19 +86,21 @@ def build_knowlege_graph_chunks(tenant_id: str, chunks: List[str], callback, ent
     for i in range(len(chunks)):
         tkn_cnt = num_tokens_from_string(chunks[i])
         if cnt+tkn_cnt >= left_token_count and texts:
-            threads.append(exe.submit(ext, texts, {"entity_types": entity_types}))
+            for b in range(0, len(texts), 16):
+                threads.append(exe.submit(ext, ["\n".join(texts[b:b+16])], {"entity_types": entity_types}, callback))
             texts = []
             cnt = 0
         texts.append(chunks[i])
         cnt += tkn_cnt
     if texts:
-        threads.append(exe.submit(ext, texts))
+        for b in range(0, len(texts), 16):
+            threads.append(exe.submit(ext, ["\n".join(texts[b:b+16])], {"entity_types": entity_types}, callback))
 
     callback(0.5, "Extracting entities.")
     graphs = []
     for i, _ in enumerate(threads):
         graphs.append(_.result().output)
-        callback(0.5 + 0.1*i/len(threads))
+        callback(0.5 + 0.1*i/len(threads), f"Entities extraction progress ... {i+1}/{len(threads)}")
 
     graph = reduce(graph_merge, graphs)
     er = EntityResolution(llm_bdl)
@@ -118,7 +127,7 @@ def build_knowlege_graph_chunks(tenant_id: str, chunks: List[str], callback, ent
 
     callback(0.6, "Extracting community reports.")
     cr = CommunityReportsExtractor(llm_bdl)
-    cr = cr(graph)
+    cr = cr(graph, callback=callback)
     for community, desc in zip(cr.structured_output, cr.output):
         chunk = {
             "title_tks": rag_tokenizer.tokenize(community["title"]),

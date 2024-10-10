@@ -101,7 +101,7 @@ class Generate(ComponentBase):
         prompt = self._param.prompt
 
         retrieval_res = self.get_input()
-        input = ("  - " + "\n  - ".join(retrieval_res["content"])) if "content" in retrieval_res else ""
+        input = ("  - "+"\n  - ".join([c for c in retrieval_res["content"] if isinstance(c, str)])) if "content" in retrieval_res else ""
         for para in self._param.parameters:
             cpn = self._canvas.get_component(para["component_id"])["obj"]
             _, out = cpn.output(allow_partial=False)
@@ -112,7 +112,7 @@ class Generate(ComponentBase):
 
         kwargs["input"] = input
         for n, v in kwargs.items():
-            prompt = re.sub(r"\{%s\}" % n, re.escape(str(v)), prompt)
+            prompt = re.sub(r"\{%s\}" % re.escape(n), str(v), prompt)
 
         downstreams = self._canvas.get_component(self._id)["downstream"]
         if kwargs.get("stream") and len(downstreams) == 1 and self._canvas.get_component(downstreams[0])[
